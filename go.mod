@@ -1,4 +1,4 @@
-module main
+module firehoseMastodon
 
 go 1.21.6
 

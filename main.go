@@ -1,15 +1,16 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
 	"net/http"
+
+	"encoding/json"
 	"os"
 	"time"
 
 	"encoding/base64"
+	managers "firehoseMastodon/managers"
 	"math/rand"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,10 @@ import (
 // generator a function type that returns string.
 type generator func() string
 
+const (
+	StreamerKey = "streamerKey"
+)
+
 var (
 	random = rand.New(rand.NewSource(time.Now().UTC().UnixNano()))
 )
@@ -27,22 +32,11 @@ var (
 type Account struct {
 	Acct string `json:"acct"`
 }
-
 type Data struct {
 	Content        string    `json:"content"`
 	AccountDetails Account   `json:"account"`
 	CreatedAt      time.Time `json:"created_at"`
-}
-
-type Comms struct {
-	clientConnections map[string]chan Data
-	postChannel       chan Data
-	deleteChannel     chan string
-}
-type Streamer struct {
-	postChannel   chan Data
-	deleteChannel chan string
-	connectionId  string
+	Id             string    `json:"id"`
 }
 
 func WithCustomHeader(key, value string) func(c *sse.Client) {
@@ -57,20 +51,17 @@ func genID(len int) string {
 	return base64.StdEncoding.EncodeToString(bytes)[:len]
 }
 
-const (
-	ConnectionId     = "connectionId"
-	PostChannelKey   = "generalPost"
-	DeleteChannelKey = "generalPost"
-	StreamerKey      = "streamerKey"
-)
-
-func createClientConnections(comms *Comms) gin.HandlerFunc {
+func createClientConnections(comms *managers.Comms, deleteChannel chan string) gin.HandlerFunc {
 	log.Println("Comms initializing.")
 	return func(ctx *gin.Context) {
-		postChannel := make(chan Data)
+		postChannel := make(chan managers.TransferData)
 		connectionId := genID(16)
-		comms.clientConnections[connectionId] = postChannel
-		streamerStruct := Streamer{postChannel: postChannel, deleteChannel: comms.deleteChannel, connectionId: connectionId}
+		ok := comms.SetConnection(connectionId, postChannel)
+		if !ok {
+			log.Fatal("Not able to set channel")
+
+		}
+		streamerStruct := managers.StreamerData{IndividualPostChannel: postChannel, DeleteChannel: deleteChannel, ConnectionId: connectionId}
 		log.Printf("Connecting %s", connectionId)
 		ctx.Set(StreamerKey, streamerStruct)
 		ctx.Next()
@@ -94,78 +85,41 @@ func main() {
 		log.Fatal("Token not configured")
 	}
 
-	postChannel := make(chan Data)
+	postChannel := make(chan managers.TransferData)
 	deleteChannel := make(chan string)
-	clientConnections := make(map[string]chan Data)
-	comms := Comms{postChannel: postChannel, clientConnections: clientConnections, deleteChannel: deleteChannel}
-	go getstream(comms.postChannel, mastodonServerDomain, mastodonBearerToken)
-	go distributor(&comms)
-	go remover(&comms)
+	comms := managers.NewComms(postChannel, deleteChannel)
+
+	go getstream(postChannel, mastodonServerDomain, mastodonBearerToken)
 
 	r := gin.Default()
 
-	r.Use(createClientConnections(&comms))
+	r.Use(createClientConnections(&comms, deleteChannel))
 	r.GET("/ping/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "pong",
 		})
 	})
 
-	r.GET("/stream", streamer)
+	r.GET("/stream", Streamer)
 	r.Run(address) // listen and serve on 0.0.0.0:8080 (for windows "localhost:8080")
 }
 
-func getstream(postChannel chan<- Data, serverDomain string, bearerToken string) {
+func getstream(postChannel chan<- managers.TransferData, serverDomain string, bearerToken string) {
 
 	// add authorization header to the req
 	client := sse.NewClient(serverDomain, WithCustomHeader("Authorization", bearerToken))
-	fmt.Println("Connected to stream")
+	log.Println("Connected to stream")
 	client.Subscribe("updated", func(msg *sse.Event) {
-		// Got some data!
-		var data Data
-		json.Unmarshal(msg.Data, &data)
-		postChannel <- data
+		var streamData Data
+		json.Unmarshal(msg.Data, &streamData)
+		transferData := managers.TransferData{Id: streamData.Id, Data: msg.Data}
+		postChannel <- transferData
 	})
 }
 
-func distributor(comms *Comms) {
-	log.Println("Launching distributor")
-	for {
-		select {
-		case data, ok := <-comms.postChannel:
-			if !ok {
-				// Close the response writer when the channel is closed
-				return
-			}
-			log.Printf("Got message from:%s", data.AccountDetails.Acct)
-
-			for connectionId, individualChannel := range comms.clientConnections {
-				log.Printf("Sending message from:%s to :%s", data.AccountDetails.Acct, connectionId)
-				individualChannel <- data
-			}
-		}
-	}
-
-}
-func remover(comms *Comms) {
-	log.Println("Launching remover")
-	for {
-		select {
-		case connectionId, ok := <-comms.deleteChannel:
-			if !ok {
-				// Close the response writer when the channel is closed
-				return
-			}
-			log.Printf("Removing :%s", connectionId)
-			delete(comms.clientConnections, connectionId)
-		}
-	}
-
-}
-
-func streamer(c *gin.Context) {
+func Streamer(c *gin.Context) {
 	// Get the response writer from the context
-	streamerStruct, ok := c.Value(StreamerKey).(Streamer)
+	streamerStruct, ok := c.Value(StreamerKey).(managers.StreamerData)
 	if !ok {
 		log.Fatal("Streamer not available in context")
 	}
@@ -173,19 +127,22 @@ func streamer(c *gin.Context) {
 	for {
 		select {
 		case <-c.Request.Context().Done():
-			streamerStruct.deleteChannel <- streamerStruct.connectionId
+			streamerStruct.DeleteChannel <- streamerStruct.ConnectionId
 
 			return
-		case data, ok := <-streamerStruct.postChannel:
+		case data, ok := <-streamerStruct.IndividualPostChannel:
 			if !ok {
 				// Close the response writer when the channel is closed
 				return
 			}
+			// Got some data!
+			var streamData Data
+			json.Unmarshal(data.Data, &streamData)
 
 			// Write the incoming data to the response writer
 			c.SSEvent("message", map[string]interface{}{
 				"type": "data",
-				"data": data,
+				"data": streamData,
 			})
 			// Flush the response to ensure the data is sent immediately
 			c.Writer.Flush()
