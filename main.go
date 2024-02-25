@@ -9,9 +9,7 @@ import (
 	"os"
 	"time"
 
-	"encoding/base64"
 	managers "firehoseMastodon/managers"
-	"math/rand"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -23,10 +21,6 @@ type generator func() string
 
 const (
 	StreamerKey = "streamerKey"
-)
-
-var (
-	random = rand.New(rand.NewSource(time.Now().UTC().UnixNano()))
 )
 
 type Account struct {
@@ -45,32 +39,19 @@ func WithCustomHeader(key, value string) func(c *sse.Client) {
 	}
 }
 
-func genID(len int) string {
-	bytes := make([]byte, len)
-	random.Read(bytes)
-	return base64.StdEncoding.EncodeToString(bytes)[:len]
-}
-
 func createClientConnections(comms *managers.Comms, deleteChannel chan string) gin.HandlerFunc {
 	log.Println("Comms initializing.")
 	return func(ctx *gin.Context) {
-		postChannel := make(chan managers.TransferData)
-		connectionId := genID(16)
-		ok := comms.SetConnection(connectionId, postChannel)
-		if !ok {
-			log.Fatal("Not able to set channel")
-
-		}
-		streamerStruct := managers.StreamerData{IndividualPostChannel: postChannel, DeleteChannel: deleteChannel, ConnectionId: connectionId}
-		log.Printf("Connecting %s", connectionId)
-		ctx.Set(StreamerKey, streamerStruct)
+		streamerData := comms.SetConnection(deleteChannel)
+		log.Printf("Connecting %s", streamerData.ConnectionId)
+		ctx.Set(StreamerKey, streamerData)
 		ctx.Next()
 	}
 }
 
 func main() {
 	var address string
-	flag.StringVar(&address, "address", "0.0.0.0:7878", "port to run")
+	flag.StringVar(&address, "address", "0.0.0.0:8000", "port to run")
 	flag.Parse()
 	err := godotenv.Load()
 	if err != nil {

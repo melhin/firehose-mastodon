@@ -2,6 +2,15 @@ package managers
 
 import (
 	"log"
+	"time"
+
+	"encoding/base64"
+	"math/rand"
+	"sync"
+)
+
+var (
+	random = rand.New(rand.NewSource(time.Now().UTC().UnixNano()))
 )
 
 type TransferData struct {
@@ -9,17 +18,29 @@ type TransferData struct {
 	Data []byte
 }
 type Comms struct {
+	mu                sync.Mutex
 	clientConnections map[string]chan TransferData
 	postChannel       chan TransferData
 }
 
-func (comms *Comms) SetConnection(connectionId string, postChannel chan TransferData) bool {
-	comms.clientConnections[connectionId] = postChannel
-	return true
+func genID(len int) string {
+	bytes := make([]byte, len)
+	random.Read(bytes)
+	return base64.StdEncoding.EncodeToString(bytes)[:len]
 }
-func (comms *Comms) DeleteConnection(connectionId string) bool {
+
+func (comms *Comms) SetConnection(deleteChannel chan string) StreamerData {
+	individualPostChannel := make(chan TransferData)
+	connectionId := genID(16)
+	comms.mu.Lock()
+	defer comms.mu.Unlock()
+	comms.clientConnections[connectionId] = individualPostChannel
+	return StreamerData{IndividualPostChannel: individualPostChannel, DeleteChannel: deleteChannel, ConnectionId: connectionId}
+}
+func (comms *Comms) DeleteConnection(connectionId string) {
+	comms.mu.Lock()
 	delete(comms.clientConnections, connectionId)
-	return true
+	comms.mu.Unlock()
 }
 
 type StreamerData struct {
@@ -46,11 +67,13 @@ func Distributor(comms *Comms) {
 				return
 			}
 			log.Printf("Got message from:%s", data.Id)
+			comms.mu.Lock()
 
 			for connectionId, individualChannel := range comms.clientConnections {
 				log.Printf("Sending message from:%s to :%s", data.Id, connectionId)
 				individualChannel <- data
 			}
+			comms.mu.Unlock()
 		}
 	}
 
