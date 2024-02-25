@@ -12,7 +12,6 @@ import (
 	managers "firehoseMastodon/managers"
 
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 	sse "github.com/r3labs/sse/v2"
 )
 
@@ -40,7 +39,6 @@ func WithCustomHeader(key, value string) func(c *sse.Client) {
 }
 
 func createClientConnections(comms *managers.Comms, deleteChannel chan string) gin.HandlerFunc {
-	log.Println("Comms initializing.")
 	return func(ctx *gin.Context) {
 		streamerData := comms.SetConnection(deleteChannel)
 		log.Printf("Connecting %s", streamerData.ConnectionId)
@@ -53,10 +51,6 @@ func main() {
 	var address string
 	flag.StringVar(&address, "address", "0.0.0.0:8000", "port to run")
 	flag.Parse()
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
 	mastodonServerDomain := os.Getenv("MASTODON_SERVER_DOMAIN")
 	if len(mastodonServerDomain) == 0 {
 		log.Fatal("domain not configured")
@@ -68,9 +62,9 @@ func main() {
 
 	postChannel := make(chan managers.TransferData)
 	deleteChannel := make(chan string)
-	comms := managers.NewComms(postChannel, deleteChannel)
 
 	go getstream(postChannel, mastodonServerDomain, mastodonBearerToken)
+	comms := managers.NewComms(postChannel, deleteChannel)
 
 	r := gin.Default()
 
@@ -89,13 +83,17 @@ func getstream(postChannel chan<- managers.TransferData, serverDomain string, be
 
 	// add authorization header to the req
 	client := sse.NewClient(serverDomain, WithCustomHeader("Authorization", bearerToken))
-	log.Println("Connected to stream")
-	client.Subscribe("updated", func(msg *sse.Event) {
+	err := client.SubscribeRaw(func(msg *sse.Event) {
+		log.Println("Connected to stream")
 		var streamData Data
 		json.Unmarshal(msg.Data, &streamData)
 		transferData := managers.TransferData{Id: streamData.Id, Data: msg.Data}
 		postChannel <- transferData
 	})
+	if err != nil {
+		log.Fatalf("Cannot connect to given domain:%s . Check env", serverDomain)
+	}
+	log.Println("DisConnected to stream")
 }
 
 func Streamer(c *gin.Context) {
