@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"math/rand"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -19,7 +21,7 @@ type TransferData struct {
 }
 type Comms struct {
 	mu                sync.Mutex
-	clientConnections map[string]chan TransferData
+	clientConnections map[uuid.UUID]chan TransferData
 	postChannel       chan TransferData
 }
 
@@ -29,15 +31,15 @@ func genID(len int) string {
 	return base64.StdEncoding.EncodeToString(bytes)[:len]
 }
 
-func (comms *Comms) SetConnection(deleteChannel chan string) StreamerData {
+func (comms *Comms) SetConnection(deleteChannel chan uuid.UUID) StreamerData {
 	individualPostChannel := make(chan TransferData)
-	connectionId := genID(16)
+	connectionId := uuid.New()
 	comms.mu.Lock()
 	defer comms.mu.Unlock()
 	comms.clientConnections[connectionId] = individualPostChannel
 	return StreamerData{IndividualPostChannel: individualPostChannel, DeleteChannel: deleteChannel, ConnectionId: connectionId}
 }
-func (comms *Comms) DeleteConnection(connectionId string) {
+func (comms *Comms) DeleteConnection(connectionId uuid.UUID) {
 	comms.mu.Lock()
 	delete(comms.clientConnections, connectionId)
 	comms.mu.Unlock()
@@ -45,12 +47,12 @@ func (comms *Comms) DeleteConnection(connectionId string) {
 
 type StreamerData struct {
 	IndividualPostChannel chan TransferData
-	DeleteChannel         chan string
-	ConnectionId          string
+	DeleteChannel         chan uuid.UUID
+	ConnectionId          uuid.UUID
 }
 
-func NewComms(PostChannel chan TransferData, deleteChannel chan string) Comms {
-	clientConnections := make(map[string]chan TransferData)
+func NewComms(PostChannel chan TransferData, deleteChannel chan uuid.UUID) Comms {
+	clientConnections := make(map[uuid.UUID]chan TransferData)
 	comms := Comms{postChannel: PostChannel, clientConnections: clientConnections}
 	go Distributor(&comms)
 	go Remover(&comms, deleteChannel)
@@ -78,7 +80,7 @@ func Distributor(comms *Comms) {
 	}
 
 }
-func Remover(comms *Comms, deleteChannel chan string) {
+func Remover(comms *Comms, deleteChannel chan uuid.UUID) {
 	log.Println("Launching remover")
 	for {
 		select {
