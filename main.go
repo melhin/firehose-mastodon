@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"strconv"
 
 	"encoding/json"
 	"os"
@@ -71,59 +72,48 @@ func main() {
 
 	postChannel := make(chan managers.TransferData)
 	deleteChannel := make(chan uuid.UUID)
-	storageChannel := make(chan managers.TransferData)
 
-	go getstream(postChannel, storageChannel, mastodonServerDomain, mastodonBearerToken)
-	go storePost(storageChannel)
+	go getstream(postChannel, mastodonServerDomain, mastodonBearerToken)
 	comms := managers.NewComms(postChannel, deleteChannel)
 
 	r := gin.Default()
 
-	r.Use(createClientConnections(&comms, deleteChannel))
+	general := r.Group("/stream")
+	general.Use(createClientConnections(&comms, deleteChannel))
+
+	general.GET("/now/", Streamer)
+
 	r.GET("/ping/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "pong",
 		})
 	})
-
-	r.GET("/stream/", Streamer)
+	r.GET("/stream/:lastTimeStamp", StreamFromSource)
 	r.Run(address) // listen and serve on 0.0.0.0:8080 (for windows "localhost:8080")
 }
 
-func getstream(postChannel chan<- managers.TransferData, storageChannel chan<- managers.TransferData, serverDomain string, bearerToken string) {
+func postStream(msg *sse.Event, postChannel chan<- managers.TransferData) {
+
+	var streamData Data
+	json.Unmarshal(msg.Data, &streamData)
+	transferData := managers.TransferData{Id: streamData.Id, Data: msg.Data}
+	inputPost := models.PostContent{Content: streamData.Content, PostId: streamData.Id, User: streamData.AccountDetails.Acct, PostCreatedAt: streamData.CreatedAt}
+	models.CreatePost(inputPost)
+	postChannel <- transferData
+}
+
+func getstream(postChannel chan<- managers.TransferData, serverDomain string, bearerToken string) {
 
 	// add authorization header to the req
 	client := sse.NewClient(serverDomain, WithCustomHeader("Authorization", bearerToken))
+	log.Println("Connected to stream")
 	err := client.SubscribeRaw(func(msg *sse.Event) {
-		log.Println("Connected to stream")
-		var streamData Data
-		json.Unmarshal(msg.Data, &streamData)
-		transferData := managers.TransferData{Id: streamData.Id, Data: msg.Data}
-		postChannel <- transferData
-		storageChannel <- transferData
+		postStream(msg, postChannel)
 	})
 	if err != nil {
 		log.Fatalf("Cannot connect to given domain:%s . Check env", serverDomain)
 	}
 	log.Println("DisConnected to stream")
-}
-
-func storePost(storageChannel chan managers.TransferData) {
-	for {
-		select {
-		case data, ok := <-storageChannel:
-			if !ok {
-				// Close the response writer when the channel is closed
-				return
-			}
-
-			var streamData Data
-			json.Unmarshal(data.Data, &streamData)
-			inputPost := models.InputPost{Content: streamData.Content, PostId: streamData.Id, User: streamData.AccountDetails.Acct, PostCreatedAt: streamData.CreatedAt}
-			models.CreatePost(inputPost)
-		}
-	}
-
 }
 
 func Streamer(c *gin.Context) {
@@ -137,7 +127,6 @@ func Streamer(c *gin.Context) {
 		select {
 		case <-c.Request.Context().Done():
 			streamerStruct.DeleteChannel <- streamerStruct.ConnectionId
-
 			return
 		case data, ok := <-streamerStruct.IndividualPostChannel:
 			if !ok {
@@ -158,4 +147,46 @@ func Streamer(c *gin.Context) {
 		}
 	}
 
+}
+
+func StreamFromSource(c *gin.Context) {
+
+	unixTimestampStr := c.Param("lastTimeStamp")                     // Extract path parameter from context
+	unixTimestamp, err := strconv.ParseInt(unixTimestampStr, 10, 64) // Parse string to int64
+	uuid := uuid.New()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Unix timestamp"})
+		return
+	}
+	var timeValue time.Time
+	timeValue = time.Unix(unixTimestamp, 0) // Convert int64 to time.Time
+	for {
+		// Got some data!
+		select {
+		case <-c.Request.Context().Done():
+			return
+		default:
+			outputData, err := models.GetLatestMessages(timeValue)
+			if err != nil {
+				log.Println(err)
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Connection Issue"})
+				return
+			}
+			if len(outputData.OutputPosts) > 0 {
+				for _, post := range outputData.OutputPosts {
+					if len(post.Content) > 0 {
+
+						c.SSEvent("message", map[string]interface{}{
+							"type": "data",
+							"data": post,
+						})
+						// Flush the response to ensure the data is sent immediately
+						c.Writer.Flush()
+						log.Printf("Sending message from:%s to :%s", post.Id, uuid)
+					}
+				}
+				timeValue = outputData.LastTimeStamp
+			}
+		}
+	}
 }
