@@ -10,8 +10,10 @@ import (
 	"time"
 
 	managers "firehoseMastodon/managers"
+	models "firehoseMastodon/models"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	sse "github.com/r3labs/sse/v2"
 )
 
@@ -38,7 +40,7 @@ func WithCustomHeader(key, value string) func(c *sse.Client) {
 	}
 }
 
-func createClientConnections(comms *managers.Comms, deleteChannel chan string) gin.HandlerFunc {
+func createClientConnections(comms *managers.Comms, deleteChannel chan uuid.UUID) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		streamerData := comms.SetConnection(deleteChannel)
 		log.Printf("Connecting %s", streamerData.ConnectionId)
@@ -59,11 +61,20 @@ func main() {
 	if len(mastodonBearerToken) == 0 {
 		log.Fatal("Token not configured")
 	}
+	dbName := os.Getenv("DB_NAME")
+	if len(mastodonBearerToken) == 0 {
+		log.Fatal("DB name not provided")
+	}
+
+	models.ConnectDatabase(dbName)
+	models.Migrate()
 
 	postChannel := make(chan managers.TransferData)
-	deleteChannel := make(chan string)
+	deleteChannel := make(chan uuid.UUID)
+	storageChannel := make(chan managers.TransferData)
 
-	go getstream(postChannel, mastodonServerDomain, mastodonBearerToken)
+	go getstream(postChannel, storageChannel, mastodonServerDomain, mastodonBearerToken)
+	go storePost(storageChannel)
 	comms := managers.NewComms(postChannel, deleteChannel)
 
 	r := gin.Default()
@@ -75,11 +86,11 @@ func main() {
 		})
 	})
 
-	r.GET("/stream", Streamer)
+	r.GET("/stream/", Streamer)
 	r.Run(address) // listen and serve on 0.0.0.0:8080 (for windows "localhost:8080")
 }
 
-func getstream(postChannel chan<- managers.TransferData, serverDomain string, bearerToken string) {
+func getstream(postChannel chan<- managers.TransferData, storageChannel chan<- managers.TransferData, serverDomain string, bearerToken string) {
 
 	// add authorization header to the req
 	client := sse.NewClient(serverDomain, WithCustomHeader("Authorization", bearerToken))
@@ -89,11 +100,30 @@ func getstream(postChannel chan<- managers.TransferData, serverDomain string, be
 		json.Unmarshal(msg.Data, &streamData)
 		transferData := managers.TransferData{Id: streamData.Id, Data: msg.Data}
 		postChannel <- transferData
+		storageChannel <- transferData
 	})
 	if err != nil {
 		log.Fatalf("Cannot connect to given domain:%s . Check env", serverDomain)
 	}
 	log.Println("DisConnected to stream")
+}
+
+func storePost(storageChannel chan managers.TransferData) {
+	for {
+		select {
+		case data, ok := <-storageChannel:
+			if !ok {
+				// Close the response writer when the channel is closed
+				return
+			}
+
+			var streamData Data
+			json.Unmarshal(data.Data, &streamData)
+			inputPost := models.InputPost{Content: streamData.Content, PostId: streamData.Id, User: streamData.AccountDetails.Acct, PostCreatedAt: streamData.CreatedAt}
+			models.CreatePost(inputPost)
+		}
+	}
+
 }
 
 func Streamer(c *gin.Context) {
