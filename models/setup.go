@@ -2,6 +2,7 @@ package models
 
 import (
 	"log"
+	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -16,6 +17,17 @@ func ConnectDatabase(dbName string) {
 	if err != nil {
 		panic("Failed to connect to database!")
 	}
+	// Enable connection pooling and set the max number of connections
+	sqlDB, err := database.DB()
+
+	// SetMaxIdleConns sets the maximum number of connections in the idle connection pool.
+	sqlDB.SetMaxIdleConns(10)
+
+	// SetMaxOpenConns sets the maximum number of open connections to the database.
+	sqlDB.SetMaxOpenConns(100)
+
+	// SetConnMaxLifetime sets the maximum amount of time a connection may be reused.
+	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	DB = database
 }
