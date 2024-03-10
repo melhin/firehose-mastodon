@@ -4,6 +4,8 @@ import (
 	"log"
 	"time"
 
+	"os"
+
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -40,4 +42,8 @@ func Migrate() {
 func DBSetup(dbName string) {
 	ConnectDatabase(dbName)
 	Migrate()
+}
+
+func RemoveDb(dbName string) {
+	os.Remove(dbName)
 }

@@ -9,11 +9,9 @@ import (
 	sse "github.com/r3labs/sse/v2"
 )
 
-func postStream(msg *sse.Event) (Data, bool) {
-
+func postStream(data []byte) Data {
 	var streamData Data
-	var contentPresent bool
-	json.Unmarshal(msg.Data, &streamData)
+	json.Unmarshal(data, &streamData)
 	if len(streamData.Content) > 0 {
 		inputPost := models.PostContent{
 			Content:       streamData.Content,
@@ -22,20 +20,17 @@ func postStream(msg *sse.Event) (Data, bool) {
 			PostCreatedAt: streamData.CreatedAt,
 		}
 		models.CreatePost(inputPost)
-		contentPresent = true
 	}
-	return streamData, contentPresent
+	return streamData
 }
 
 func PullFromSource(postChannel chan<- managers.TransferData, serverDomain string, bearerToken string) {
 
-	// add authorization header to the req
 	client := sse.NewClient(serverDomain, WithCustomHeader("Authorization", bearerToken))
 	log.Println("Connected to stream")
 	err := client.SubscribeRaw(func(msg *sse.Event) {
-		streamData, contentPresent := postStream((msg))
-		if contentPresent {
-
+		streamData := postStream(msg.Data)
+		if len(streamData.Content) > 0 {
 			transferData := managers.TransferData{Id: streamData.Id, Data: msg.Data}
 			postChannel <- transferData
 		}

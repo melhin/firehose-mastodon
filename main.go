@@ -44,12 +44,7 @@ func createClientConnections(comms *managers.Comms, deleteChannel chan uuid.UUID
 	}
 }
 
-func main() {
-	cfg := GetConfig()
-	models.DBSetup(cfg.DbName)
-
-	postChannel := make(chan managers.TransferData)
-	deleteChannel := make(chan uuid.UUID)
+func setupRouter() *gin.Engine {
 
 	r := gin.Default()
 	r.GET("/health/", func(c *gin.Context) {
@@ -58,13 +53,28 @@ func main() {
 		})
 	})
 	r.GET("/stream/:lastTimeStamp", StreamFromSource)
+	return r
 
-	now := r.Group("/stream")
+}
+
+func SetupLiveFeed(r *gin.Engine, postChannel chan managers.TransferData) {
+
+	deleteChannel := make(chan uuid.UUID)
 	comms := managers.NewComms(postChannel, deleteChannel)
+	now := r.Group("/stream")
 	now.Use(createClientConnections(&comms, deleteChannel))
 	now.GET("/now/", Streamer)
+}
+
+func main() {
+	cfg := GetConfig()
+	models.DBSetup(cfg.DbName)
+
+	postChannel := make(chan managers.TransferData)
+	r := setupRouter()
 
 	go PullFromSource(postChannel, cfg.MastodonServerDomain, cfg.MastodonBearerToken)
+	SetupLiveFeed(r, postChannel)
 	r.Run(cfg.Address)
 }
 
