@@ -3,6 +3,7 @@ module firehoseMastodon
 go 1.21.6
 
 require (
+	github.com/caarlos0/env/v10 v10.0.0
 	github.com/gin-gonic/gin v1.9.1
 	github.com/google/uuid v1.6.0
 	github.com/r3labs/sse/v2 v2.10.0

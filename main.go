@@ -1,13 +1,10 @@
 package main
 
 import (
-	"flag"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
-
-	"encoding/json"
-	"os"
 	"time"
 
 	managers "firehoseMastodon/managers"
@@ -17,9 +14,6 @@ import (
 	"github.com/google/uuid"
 	sse "github.com/r3labs/sse/v2"
 )
-
-// generator a function type that returns string.
-type generator func() string
 
 const (
 	StreamerKey = "streamerKey"
@@ -51,69 +45,27 @@ func createClientConnections(comms *managers.Comms, deleteChannel chan uuid.UUID
 }
 
 func main() {
-	var address string
-	flag.StringVar(&address, "address", "0.0.0.0:8000", "port to run")
-	flag.Parse()
-	mastodonServerDomain := os.Getenv("MASTODON_SERVER_DOMAIN")
-	if len(mastodonServerDomain) == 0 {
-		log.Fatal("domain not configured")
-	}
-	mastodonBearerToken := os.Getenv("MASTODON_BEARER_TOKEN")
-	if len(mastodonBearerToken) == 0 {
-		log.Fatal("Token not configured")
-	}
-	dbName := os.Getenv("DB_NAME")
-	if len(mastodonBearerToken) == 0 {
-		log.Fatal("DB name not provided")
-	}
-
-	models.ConnectDatabase(dbName)
-	models.Migrate()
+	cfg := GetConfig()
+	models.DBSetup(cfg.DbName)
 
 	postChannel := make(chan managers.TransferData)
 	deleteChannel := make(chan uuid.UUID)
 
-	go getstream(postChannel, mastodonServerDomain, mastodonBearerToken)
-	comms := managers.NewComms(postChannel, deleteChannel)
-
 	r := gin.Default()
-
-	general := r.Group("/stream")
-	general.Use(createClientConnections(&comms, deleteChannel))
-
-	general.GET("/now/", Streamer)
-
-	r.GET("/ping/", func(c *gin.Context) {
+	r.GET("/health/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"message": "pong",
+			"message": "ok",
 		})
 	})
 	r.GET("/stream/:lastTimeStamp", StreamFromSource)
-	r.Run(address) // listen and serve on 0.0.0.0:8080 (for windows "localhost:8080")
-}
 
-func postStream(msg *sse.Event, postChannel chan<- managers.TransferData) {
+	now := r.Group("/stream")
+	comms := managers.NewComms(postChannel, deleteChannel)
+	now.Use(createClientConnections(&comms, deleteChannel))
+	now.GET("/now/", Streamer)
 
-	var streamData Data
-	json.Unmarshal(msg.Data, &streamData)
-	transferData := managers.TransferData{Id: streamData.Id, Data: msg.Data}
-	inputPost := models.PostContent{Content: streamData.Content, PostId: streamData.Id, User: streamData.AccountDetails.Acct, PostCreatedAt: streamData.CreatedAt}
-	models.CreatePost(inputPost)
-	postChannel <- transferData
-}
-
-func getstream(postChannel chan<- managers.TransferData, serverDomain string, bearerToken string) {
-
-	// add authorization header to the req
-	client := sse.NewClient(serverDomain, WithCustomHeader("Authorization", bearerToken))
-	log.Println("Connected to stream")
-	err := client.SubscribeRaw(func(msg *sse.Event) {
-		postStream(msg, postChannel)
-	})
-	if err != nil {
-		log.Fatalf("Cannot connect to given domain:%s . Check env", serverDomain)
-	}
-	log.Println("DisConnected to stream")
+	go PullFromSource(postChannel, cfg.MastodonServerDomain, cfg.MastodonBearerToken)
+	r.Run(cfg.Address)
 }
 
 func Streamer(c *gin.Context) {
@@ -174,16 +126,14 @@ func StreamFromSource(c *gin.Context) {
 			}
 			if len(outputData.OutputPosts) > 0 {
 				for _, post := range outputData.OutputPosts {
-					if len(post.Content) > 0 {
 
-						c.SSEvent("message", map[string]interface{}{
-							"type": "data",
-							"data": post,
-						})
-						// Flush the response to ensure the data is sent immediately
-						c.Writer.Flush()
-						log.Printf("Sending message from:%s to :%s", post.Id, uuid)
-					}
+					c.SSEvent("message", map[string]interface{}{
+						"type": "data",
+						"data": post,
+					})
+					// Flush the response to ensure the data is sent immediately
+					c.Writer.Flush()
+					log.Printf("Sending message from:%s to :%s", post.Id, uuid)
 				}
 				timeValue = outputData.LastTimeStamp
 			}

@@ -36,3 +36,8 @@ func Migrate() {
 	DB.AutoMigrate(&Post{})
 	log.Println("Database Migration Completed!")
 }
+
+func DBSetup(dbName string) {
+	ConnectDatabase(dbName)
+	Migrate()
+}
