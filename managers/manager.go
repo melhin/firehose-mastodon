@@ -4,7 +4,6 @@ import (
 	"log"
 	"time"
 
-	"encoding/base64"
 	"math/rand"
 	"sync"
 
@@ -23,12 +22,6 @@ type Comms struct {
 	mu                sync.Mutex
 	clientConnections map[uuid.UUID]chan TransferData
 	postChannel       chan TransferData
-}
-
-func genID(len int) string {
-	bytes := make([]byte, len)
-	random.Read(bytes)
-	return base64.StdEncoding.EncodeToString(bytes)[:len]
 }
 
 func (comms *Comms) SetConnection(deleteChannel chan uuid.UUID) StreamerData {
